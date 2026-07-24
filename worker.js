@@ -271,6 +271,11 @@ async function searchTruper(query, debug = false) {
       htmlLength: html.length,
       rowChunksFound: rowChunks.length,
       resultsParsed: results.length,
+      // Diagnóstico fino: cuántas celdas <td> detectamos en las primeras
+      // filas, y el HTML crudo de la primera fila para ver la estructura
+      // real (por si el orden de columnas no es el que asumimos).
+      cellCountsPerRow: rowChunks.slice(0, 5).map((r) => r.split(/<td[^>]*>/i).length - 1),
+      firstRowRawSample: (rowChunks[0] || '').slice(0, 3000),
       results,
     };
   }
