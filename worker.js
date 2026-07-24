@@ -94,30 +94,25 @@ function jsonResponse(obj, status = 200) {
 }
 
 // ============================================================================
-// BÚSQUEDA WEB GENÉRICA (DuckDuckGo HTML) — no requiere API key
+// BÚSQUEDA WEB GENÉRICA (Bing) — no requiere API key
 // ============================================================================
-// DuckDuckGo tiene una versión HTML simple (sin JS) pensada para navegadores
-// antiguos / lectores. Es perfecta para scraping de resultados de búsqueda
-// porque no exige ejecutar JavaScript para ver los links.
-// NOTA: esta función ya solo la usa searchDyna(). searchTruper() dejó de
-// necesitarla porque ahora consulta directamente el buscador oficial de
-// Truper (ver más abajo).
-async function ddgSearch(query, maxResults = 5, debug = false) {
-  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+// NOTA: antes usábamos html.duckduckgo.com aquí, pero confirmamos con
+// debug=1 que DuckDuckGo le está devolviendo al Worker un HTTP 202 sin
+// resultados (un bloqueo/página de verificación típica contra tráfico
+// automatizado desde IPs de datacenter como las de Cloudflare). Bing sirve
+// HTML estático más simple para resultados orgánicos y tolera mejor este
+// tipo de scraping servidor-a-servidor, así que lo usamos en su lugar.
+async function webSearch(query, maxResults = 5, debug = false) {
+  const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
   const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
   const html = await res.text();
 
   const links = [];
-  // Los resultados en la versión HTML usan <a class="result__a" href="...">
-  const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"/g;
+  // Bing envuelve cada resultado orgánico en <h2><a href="...">Título</a></h2>
+  const re = /<h2><a[^>]+href="([^"]+)"/g;
   let m;
   while ((m = re.exec(html)) && links.length < maxResults) {
-    let href = m[1];
-    // DuckDuckGo a veces envuelve el link real dentro de una redirección
-    // tipo /l/?uddg=<url-encoded>. Si es así, lo desenvolvemos.
-    const uddgMatch = href.match(/uddg=([^&]+)/);
-    if (uddgMatch) href = decodeURIComponent(uddgMatch[1]);
-    links.push(href);
+    links.push(m[1]);
   }
 
   if (debug) {
@@ -125,9 +120,8 @@ async function ddgSearch(query, maxResults = 5, debug = false) {
       links,
       httpStatus: res.status,
       htmlLength: html.length,
-      // Primeros 1500 caracteres del HTML crudo que devolvió DuckDuckGo,
-      // para distinguir entre "0 resultados reales" y "nos bloqueó con
-      // una página de verificación/captcha en vez de resultados".
+      // Primeros 1500 caracteres del HTML crudo que devolvió Bing, para
+      // diagnosticar si algún día también empieza a bloquear al Worker.
       htmlSample: html.slice(0, 1500),
     };
   }
@@ -138,17 +132,17 @@ async function ddgSearch(query, maxResults = 5, debug = false) {
 // DYNA (dyna.com.co)
 // ============================================================================
 async function searchDyna(query, debug = false) {
-  // 1) Buscamos en DuckDuckGo restringido al dominio de Dyna
-  const ddgResult = await ddgSearch(`site:dyna.com.co ${query}`, 5, debug);
-  const links = debug ? ddgResult.links : ddgResult;
+  // 1) Buscamos en Bing restringido al dominio de Dyna
+  const searchResult = await webSearch(`site:dyna.com.co ${query}`, 5, debug);
+  const links = debug ? searchResult.links : searchResult;
   const productLinks = links.filter((l) => /dyna\.com\.co\/(public\/)?producto\//i.test(l));
 
   if (debug && productLinks.length === 0) {
     return {
-      ddgHttpStatus: ddgResult.httpStatus,
-      ddgHtmlLength: ddgResult.htmlLength,
-      ddgHtmlSample: ddgResult.htmlSample,
-      ddgLinksFound: links,
+      webSearchHttpStatus: searchResult.httpStatus,
+      webSearchHtmlLength: searchResult.htmlLength,
+      webSearchHtmlSample: searchResult.htmlSample,
+      webSearchLinksFound: links,
       productLinksFound: productLinks,
       results: [],
     };
@@ -185,9 +179,9 @@ async function searchDyna(query, debug = false) {
 
   if (debug) {
     return {
-      ddgHttpStatus: ddgResult.httpStatus,
-      ddgHtmlLength: ddgResult.htmlLength,
-      ddgLinksFound: links,
+      webSearchHttpStatus: searchResult.httpStatus,
+      webSearchHtmlLength: searchResult.htmlLength,
+      webSearchLinksFound: links,
       productLinksFound: productLinks,
       resultsParsed: results.length,
       results,
@@ -318,4 +312,4 @@ async function searchTruper(query, debug = false) {
   }
 
   return results;
-                    }
+}
