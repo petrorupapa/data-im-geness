@@ -235,6 +235,16 @@ async function searchTruper(query, debug = false) {
     .replace(/\s+/g, ' ')
     .trim();
 
+  // Cada celda envuelve su contenido en <a class="search-mod ..."> seguido
+  // de un <div name="..." class="hidden ...">...</div> con la lista oculta
+  // de variantes (código+sku) para el tooltip de "Ficha técnica". Ese div
+  // oculto NO es lo que queremos mostrar como Código/Clave/Descripción —
+  // nos quedamos solo con lo que está ANTES de que empiece ese div.
+  const visibleCellText = (cellHtml) => {
+    const beforeHiddenDiv = cellHtml.split(/<div\s+(?:name=|[^>]*class="hidden)/i)[0];
+    return stripText(beforeHiddenDiv);
+  };
+
   const results = [];
   const seenCodigos = new Set();
 
@@ -244,9 +254,9 @@ async function searchTruper(query, debug = false) {
     const cellChunks = rowHtml.split(/<td[^>]*>/i).slice(1).map((c) => c.split(/<\/td>/i)[0]);
     if (cellChunks.length < 5) continue; // no es una fila de producto (ej. fila de cabecera/filtros)
 
-    const codigo = stripText(cellChunks[2] || '');
-    const clave = stripText(cellChunks[3] || '');
-    const descripcion = stripText(cellChunks[4] || '');
+    const codigo = visibleCellText(cellChunks[2] || '');
+    const clave = visibleCellText(cellChunks[3] || '');
+    const descripcion = visibleCellText(cellChunks[4] || '');
 
     // Si la columna "Código" no es puramente numérica, esta fila no es un
     // producto real (puede ser una fila de agrupación u otra cosa rara).
