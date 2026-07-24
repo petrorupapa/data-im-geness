@@ -72,9 +72,11 @@ export default {
         return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna= o ?truper=' }, 400);
       }
 
+      const debug = url.searchParams.get('debug') === '1';
+
       const [dyna, truper] = await Promise.all([
-        dynaQuery ? searchDyna(dynaQuery).catch((e) => { console.error('Dyna error', e); return []; }) : [],
-        truperQuery ? searchTruper(truperQuery).catch((e) => { console.error('Truper error', e); return []; }) : [],
+        dynaQuery ? searchDyna(dynaQuery, debug).catch((e) => { console.error('Dyna error', e); return debug ? { error: String(e) } : []; }) : [],
+        truperQuery ? searchTruper(truperQuery, debug).catch((e) => { console.error('Truper error', e); return debug ? { error: String(e) } : []; }) : [],
       ]);
 
       return jsonResponse({ dyna, truper });
@@ -123,10 +125,14 @@ async function ddgSearch(query, maxResults = 5) {
 // ============================================================================
 // DYNA (dyna.com.co)
 // ============================================================================
-async function searchDyna(query) {
+async function searchDyna(query, debug = false) {
   // 1) Buscamos en DuckDuckGo restringido al dominio de Dyna
   const links = await ddgSearch(`site:dyna.com.co ${query}`, 5);
   const productLinks = links.filter((l) => /dyna\.com\.co\/(public\/)?producto\//i.test(l));
+
+  if (debug && productLinks.length === 0) {
+    return { ddgLinksFound: links, productLinksFound: productLinks, results: [] };
+  }
 
   const results = [];
   for (const link of productLinks.slice(0, 3)) {
@@ -156,6 +162,11 @@ async function searchDyna(query) {
       console.error('Error leyendo producto Dyna', link, e);
     }
   }
+
+  if (debug) {
+    return { ddgLinksFound: links, productLinksFound: productLinks, resultsParsed: results.length, results };
+  }
+
   return results;
 }
 
@@ -180,21 +191,37 @@ async function searchDyna(query) {
 //   - La imagen se puede armar de forma 100% determinística a partir del
 //     código: https://www.truper.com/admin/images/ch/{codigo}.jpg
 //     (ya no hay que "adivinar" sufijos +D1/+D2/+D3 con peticiones HEAD).
-async function searchTruper(query) {
+async function searchTruper(query, debug = false) {
   const searchUrl = `https://www.truper.com/CatVigente/buscador?palabra=${encodeURIComponent(query)}&page=1`;
   const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
-  if (!res.ok) return [];
+
+  if (!res.ok) {
+    return debug ? { httpStatus: res.status, results: [] } : [];
+  }
 
   const html = await res.text();
 
   // El sitio muestra este mensaje literal cuando no hay coincidencias.
-  if (/No hay productos que concuerden/i.test(html)) return [];
-
-  // Nos quedamos solo con la primera tabla de resultados para no arrastrar
-  // basura del menú/encabezado de la página (que también trae <td>/<tr>
-  // en algunos casos, ej. el menú de marcas).
+  const noMatches = /No hay productos que concuerden/i.test(html);
   const tableMatch = html.match(/<table[^>]*>[\s\S]*?<\/table>/i);
-  if (!tableMatch) return [];
+
+  if (noMatches || !tableMatch) {
+    if (debug) {
+      return {
+        httpStatus: res.status,
+        htmlLength: html.length,
+        noMatchesMessageFound: noMatches,
+        tableFound: !!tableMatch,
+        // Primeros 1500 caracteres del HTML crudo tal cual lo recibió el
+        // Worker, para ver si realmente trae la tabla o si el sitio exige
+        // JavaScript / cookies / bloquea el fetch.
+        htmlSample: html.slice(0, 1500),
+        results: [],
+      };
+    }
+    return [];
+  }
+
   const tableHtml = tableMatch[0];
 
   // Partimos la tabla en filas. El primer trozo (antes del primer <tr>) se
@@ -236,6 +263,16 @@ async function searchTruper(query) {
       // el <img onerror> del frontend ya oculta la miniatura si no carga.
       images: [`https://www.truper.com/admin/images/ch/${codigo}.jpg`],
     });
+  }
+
+  if (debug) {
+    return {
+      httpStatus: res.status,
+      htmlLength: html.length,
+      rowChunksFound: rowChunks.length,
+      resultsParsed: results.length,
+      results,
+    };
   }
 
   return results;
