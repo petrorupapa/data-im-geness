@@ -321,15 +321,26 @@ async function searchTruper(query, debug = false) {
     if (!/^\d+$/.test(codigo) || seenCodigos.has(codigo)) continue;
     seenCodigos.add(codigo);
 
+    // Imagen de alta calidad: el Banco de Contenido Digital de Truper sirve
+    // la foto real del producto (hasta 1800x1800px) en esta ruta, armada
+    // directo desde la CLAVE — no requiere ningún "id" interno del sitio.
+    // Es MUCHO mejor calidad que la miniatura pequeña que usa la tabla del
+    // buscador (admin/images/ch/{codigo}.jpg), así que la ponemos primero;
+    // dejamos la miniatura como segunda opción de respaldo por si la clave
+    // no tiene foto en el banco (el <img onerror> del frontend la oculta
+    // sola si no carga, así que no hay riesgo de mostrar un roto).
+    const images = [];
+    if (clave) {
+      images.push(`https://www.truper.com/media/import/imagenes/${encodeURIComponent(clave.toUpperCase())}.jpg`);
+    }
+    images.push(`https://www.truper.com/admin/images/ch/${codigo}.jpg`);
+
     results.push({
       title: descripcion || null,
       clave: clave || null,
       codigo,
       productUrl: searchUrl,
-      // Patrón de imagen oficial del catálogo Truper, armado directo desde
-      // el código — no requiere peticiones extra para confirmar que existe;
-      // el <img onerror> del frontend ya oculta la miniatura si no carga.
-      images: [`https://www.truper.com/admin/images/ch/${codigo}.jpg`],
+      images,
     });
   }
 
@@ -345,13 +356,16 @@ async function searchTruper(query, debug = false) {
     const candidates = [`https://www.truper.com/admin/images/ch/${exactMatch.codigo}.jpg`];
     if (exactMatch.clave) {
       const claveUp = encodeURIComponent(exactMatch.clave.toUpperCase());
-      candidates.push(
-        `https://www.truper.com/media/import/imagenes/${claveUp}.jpg`,
-        `https://www.truper.com/media/import/imagenes/${claveUp}+D1.jpg`,
-        `https://www.truper.com/media/import/imagenes/${claveUp}+D2.jpg`,
-        `https://www.truper.com/media/import/imagenes/${claveUp}+D3.jpg`,
-        `https://www.truper.com/media/import/imagenes/${claveUp}+D4.jpg`,
-      );
+      // Confirmamos en el propio Banco de Contenido Digital de Truper que
+      // usan más de un esquema de sufijo para fotos adicionales según el
+      // producto (ej. "+D1".."+D4" y también "+FC1".."+FC4"), así que
+      // probamos ambos. Las que no existan simplemente no pasan el HEAD.
+      candidates.push(`https://www.truper.com/media/import/imagenes/${claveUp}.jpg`);
+      for (const prefix of ['D', 'FC']) {
+        for (let n = 1; n <= 4; n++) {
+          candidates.push(`https://www.truper.com/media/import/imagenes/${claveUp}+${prefix}${n}.jpg`);
+        }
+      }
     }
     const confirmedImages = await fetchExistingImages(candidates);
     if (confirmedImages.length) {
@@ -376,4 +390,4 @@ async function searchTruper(query, debug = false) {
   }
 
   return results;
-          }
+}
