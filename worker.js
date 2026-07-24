@@ -116,18 +116,23 @@ async function webSearch(query, maxResults = 5, debug = false) {
   }
 
   if (debug) {
-    // Buscamos un fragmento del CUERPO real de resultados (no solo el
-    // <head>) para poder ver el marcado exacto que usa Bing hoy y ajustar
-    // el regex si hace falta. "b_algo" es la clase que Bing usa para cada
-    // resultado orgánico individual.
-    const bodyIndex = html.indexOf('b_algo');
-    const bodySample = bodyIndex >= 0 ? html.slice(bodyIndex - 200, bodyIndex + 1500) : '(no se encontró "b_algo" en el HTML — puede que Bing haya cambiado el marcado, o que no haya resultados)';
+    // Probamos varios marcadores candidatos de resultados/orgánicos que
+    // Bing ha usado históricamente, para ver cuál (si alguno) está presente
+    // hoy en la respuesta real.
+    const markers = ['b_algo', 'b_results', 'b_title', 'b_caption', 'b_no_results', 'No obtuvimos resultados', 'No se encontraron'];
+    const markerPresence = {};
+    for (const mk of markers) markerPresence[mk] = html.includes(mk);
+
+    // Tomamos un pedazo del cuerpo real (después de </head>) para ver el
+    // marcado tal cual, sin importar qué clase esté usando.
+    const bodyStart = html.indexOf('</head>');
+    const bodySample = bodyStart >= 0 ? html.slice(bodyStart, bodyStart + 3000) : html.slice(0, 3000);
 
     return {
       links,
       httpStatus: res.status,
       htmlLength: html.length,
-      htmlSample: html.slice(0, 800),
+      markerPresence,
       bodySample,
     };
   }
@@ -147,7 +152,7 @@ async function searchDyna(query, debug = false) {
     return {
       webSearchHttpStatus: searchResult.httpStatus,
       webSearchHtmlLength: searchResult.htmlLength,
-      webSearchHtmlSample: searchResult.htmlSample,
+      webSearchMarkerPresence: searchResult.markerPresence,
       webSearchBodySample: searchResult.bodySample,
       webSearchLinksFound: links,
       productLinksFound: productLinks,
@@ -198,6 +203,23 @@ async function searchDyna(query, debug = false) {
   return results;
 }
 
+// Cuando el usuario busca por un código o clave EXACTO (no texto libre),
+// Truper suele tener más de una foto del mismo producto en su banco de
+// imágenes por clave (foto principal + ángulos adicionales D1, D2, D3, D4).
+// Probamos cuáles existen de verdad con peticiones HEAD (rápidas, no traen
+// el contenido de la imagen) y devolvemos solo las que sí responden 200.
+async function fetchExistingImages(candidateUrls) {
+  const checks = await Promise.all(candidateUrls.map(async (imgUrl) => {
+    try {
+      const head = await fetch(imgUrl, { method: 'HEAD', headers: FETCH_HEADERS });
+      return head.ok ? imgUrl : null;
+    } catch (e) {
+      return null;
+    }
+  }));
+  return checks.filter(Boolean);
+}
+
 // ============================================================================
 // TRUPER — Catálogo Vigente oficial (truper.com/CatVigente/buscador)
 // ============================================================================
@@ -219,6 +241,14 @@ async function searchDyna(query, debug = false) {
 //   - La imagen se puede armar de forma 100% determinística a partir del
 //     código: https://www.truper.com/admin/images/ch/{codigo}.jpg
 //     (ya no hay que "adivinar" sufijos +D1/+D2/+D3 con peticiones HEAD).
+//
+// NUEVO (esta versión): si la consulta coincide EXACTO con el código o la
+// clave de uno de los resultados (ej. escribiste "9524" o "MARG-21X"), le
+// agregamos a ESE resultado todas las fotos adicionales del mismo producto
+// que encontremos en el banco de imágenes por clave (foto principal +
+// ángulos D1-D4), para que puedas elegir cuál usar. Esto NO se hace para
+// búsquedas de texto libre con muchos resultados (sería lento pedir 5 fotos
+// x 20 productos), solo para el caso "un código/clave específico".
 async function searchTruper(query, debug = false) {
   const searchUrl = `https://www.truper.com/CatVigente/buscador?palabra=${encodeURIComponent(query)}&page=1`;
   const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
@@ -303,12 +333,39 @@ async function searchTruper(query, debug = false) {
     });
   }
 
+  // Si lo que escribiste coincide EXACTO con el código o la clave de uno de
+  // los resultados, vamos por las fotos adicionales de ESE producto (no de
+  // todos, para no hacer lento el buscador de texto libre).
+  const trimmedQuery = query.trim().toUpperCase();
+  const exactMatch = results.find(
+    (r) => r.codigo === query.trim() || (r.clave && r.clave.toUpperCase() === trimmedQuery)
+  );
+
+  if (exactMatch) {
+    const candidates = [`https://www.truper.com/admin/images/ch/${exactMatch.codigo}.jpg`];
+    if (exactMatch.clave) {
+      const claveUp = encodeURIComponent(exactMatch.clave.toUpperCase());
+      candidates.push(
+        `https://www.truper.com/media/import/imagenes/${claveUp}.jpg`,
+        `https://www.truper.com/media/import/imagenes/${claveUp}+D1.jpg`,
+        `https://www.truper.com/media/import/imagenes/${claveUp}+D2.jpg`,
+        `https://www.truper.com/media/import/imagenes/${claveUp}+D3.jpg`,
+        `https://www.truper.com/media/import/imagenes/${claveUp}+D4.jpg`,
+      );
+    }
+    const confirmedImages = await fetchExistingImages(candidates);
+    if (confirmedImages.length) {
+      exactMatch.images = [...new Set([...exactMatch.images, ...confirmedImages])];
+    }
+  }
+
   if (debug) {
     return {
       httpStatus: res.status,
       htmlLength: html.length,
       rowChunksFound: rowChunks.length,
       resultsParsed: results.length,
+      exactMatchFound: !!exactMatch,
       // Diagnóstico fino: cuántas celdas <td> detectamos en las primeras
       // filas, y el HTML crudo de la primera fila para ver la estructura
       // real (por si el orden de columnas no es el que asumimos).
@@ -319,4 +376,4 @@ async function searchTruper(query, debug = false) {
   }
 
   return results;
-}
+          }
