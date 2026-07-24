@@ -5,8 +5,8 @@
  * Este worker recibe el nombre y/o código de un producto y hace scraping EN
  * VIVO de:
  *   1) dyna.com.co (tu proveedor) — busca el producto y extrae la(s) foto(s)
- *   2) truper.com/BancoContenidoDigital — busca por clave/código y extrae
- *      la(s) foto(s) directas del banco de imágenes oficial de Truper
+ *   2) truper.com — busca por palabra/código/clave en el catálogo público
+ *      vigente y extrae la(s) foto(s) directas del catálogo oficial de Truper
  *
  * Por qué esto vive en un Worker y no en el navegador:
  * Los navegadores no pueden hacer fetch() a dominios externos que no lo
@@ -97,6 +97,9 @@ function jsonResponse(obj, status = 200) {
 // DuckDuckGo tiene una versión HTML simple (sin JS) pensada para navegadores
 // antiguos / lectores. Es perfecta para scraping de resultados de búsqueda
 // porque no exige ejecutar JavaScript para ver los links.
+// NOTA: esta función ya solo la usa searchDyna(). searchTruper() dejó de
+// necesitarla porque ahora consulta directamente el buscador oficial de
+// Truper (ver más abajo).
 async function ddgSearch(query, maxResults = 5) {
   const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
@@ -157,117 +160,83 @@ async function searchDyna(query) {
 }
 
 // ============================================================================
-// TRUPER (truper.com/BancoContenidoDigital)
+// TRUPER — Catálogo Vigente oficial (truper.com/CatVigente/buscador)
 // ============================================================================
-async function searchTruper(codeOrName) {
+// NUEVO (reemplaza la versión anterior basada en DuckDuckGo + Banco de
+// Contenido Digital):
+//
+// Truper tiene un buscador PÚBLICO y OFICIAL de su catálogo nacional en:
+//   https://www.truper.com/CatVigente/buscador?palabra=CONSULTA&page=1
+//
+// Ahí adentro acepta indistintamente: texto libre ("martillo"), código
+// numérico interno ("16702") o clave comercial ("MTR-16"), y siempre
+// devuelve una tabla HTML con columnas fijas en este orden:
+//   Núm. | Marca | Código | Clave | Descripción | Módulo(foto) | Ficha técnica | Página
+//
+// Ventajas frente al método viejo:
+//   - No depende de que DuckDuckGo haya indexado la página (antes fallaba
+//     seguido porque el Banco de Contenido Digital es un sitio chico).
+//   - Funciona con código, clave O nombre libre, no solo con la clave exacta.
+//   - La imagen se puede armar de forma 100% determinística a partir del
+//     código: https://www.truper.com/admin/images/ch/{codigo}.jpg
+//     (ya no hay que "adivinar" sufijos +D1/+D2/+D3 con peticiones HEAD).
+async function searchTruper(query) {
+  const searchUrl = `https://www.truper.com/CatVigente/buscador?palabra=${encodeURIComponent(query)}&page=1`;
+  const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
+  if (!res.ok) return [];
+
+  const html = await res.text();
+
+  // El sitio muestra este mensaje literal cuando no hay coincidencias.
+  if (/No hay productos que concuerden/i.test(html)) return [];
+
+  // Nos quedamos solo con la primera tabla de resultados para no arrastrar
+  // basura del menú/encabezado de la página (que también trae <td>/<tr>
+  // en algunos casos, ej. el menú de marcas).
+  const tableMatch = html.match(/<table[^>]*>[\s\S]*?<\/table>/i);
+  if (!tableMatch) return [];
+  const tableHtml = tableMatch[0];
+
+  // Partimos la tabla en filas. El primer trozo (antes del primer <tr>) se
+  // descarta porque es solo la apertura de la tabla.
+  const rowChunks = tableHtml.split(/<tr[^>]*>/i).slice(1);
+
+  const stripText = (cellHtml) => cellHtml
+    .replace(/<[^>]+>/g, ' ')   // quitamos etiquetas
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   const results = [];
+  const seenCodigos = new Set();
 
-  // Siempre intentamos primero la búsqueda real (para poder traer el NOMBRE
-  // del producto, no solo la imagen). Buscamos la página de detalle en el
-  // Banco de Contenido Digital de Truper.
-  const links = await ddgSearch(`site:truper.com BancoContenidoDigital ${codeOrName}`, 5);
-  const viewLinks = links.filter((l) => /truper\.com\/BancoContenidoDigital/i.test(l));
+  for (const rowHtml of rowChunks) {
+    // Cada fila trae 8 columnas: Núm, Marca, Código, Clave, Descripción,
+    // Módulo(foto), Ficha técnica, Página — en ese orden.
+    const cellChunks = rowHtml.split(/<td[^>]*>/i).slice(1).map((c) => c.split(/<\/td>/i)[0]);
+    if (cellChunks.length < 5) continue; // no es una fila de producto (ej. fila de cabecera/filtros)
 
-  for (const link of viewLinks.slice(0, 3)) {
-    try {
-      const res = await fetch(link, { headers: FETCH_HEADERS });
-      if (!res.ok) continue;
-      const html = await res.text();
-      const parsed = parseTruperInfoPage(html);
-      if (parsed && parsed.images.length) {
-        results.push({ ...parsed, productUrl: link });
-      }
-    } catch (e) {
-      console.error('Error leyendo producto Truper', link, e);
-    }
-  }
+    const codigo = stripText(cellChunks[2] || '');
+    const clave = stripText(cellChunks[3] || '');
+    const descripcion = stripText(cellChunks[4] || '');
 
-  if (results.length) return results;
+    // Si la columna "Código" no es puramente numérica, esta fila no es un
+    // producto real (puede ser una fila de agrupación u otra cosa rara).
+    if (!/^\d+$/.test(codigo) || seenCodigos.has(codigo)) continue;
+    seenCodigos.add(codigo);
 
-  // Respaldo: si la búsqueda no encontró nada pero lo que nos dieron ya
-  // parece ser la "clave" exacta de Truper (ej FE-AS-8X-16X), construimos
-  // la URL de la imagen directamente. En este caso no podemos garantizar
-  // el nombre real (no tenemos la página), así que lo dejamos en null para
-  // que la app no invente un nombre.
-  const looksLikeClave = /^[A-Za-z0-9]+(-[A-Za-z0-9]+)+$/.test(codeOrName.trim());
-  if (looksLikeClave) {
-    const clave = codeOrName.trim().toUpperCase();
-    const candidates = ['', '+D1', '+D2', '+D3', '+D4'].map(
-      (suf) => `https://www.truper.com/media/import/imagenes/${encodeURIComponent(clave + suf)}.jpg`
-    );
-    const found = [];
-    for (const imgUrl of candidates) {
-      try {
-        const head = await fetch(imgUrl, { method: 'HEAD', headers: FETCH_HEADERS });
-        if (head.ok) found.push(imgUrl);
-      } catch (e) { /* ignorar */ }
-    }
-    if (found.length) {
-      let fallbackTitle = null;
-      try {
-        // Último intento: buscar el nombre en la web en general (sin
-        // restringir a un solo sitio), por si alguna ficha de distribuidor
-        // menciona esta clave junto con el nombre del producto.
-        const genericLinks = await ddgSearch(`truper ${clave}`, 3);
-        for (const link of genericLinks) {
-          try {
-            const res = await fetch(link, { headers: FETCH_HEADERS });
-            if (!res.ok) continue;
-            const html = await res.text();
-            const t = html.match(/<title>([^<]+)<\/title>/i);
-            if (t && t[1] && !/truper\.com/i.test(link)) {
-              fallbackTitle = t[1].replace(/[-|].*$/, '').trim();
-              break;
-            }
-          } catch (e) { /* ignorar */ }
-        }
-      } catch (e) { /* ignorar */ }
-      results.push({ title: fallbackTitle, clave, codigo: null, images: found });
-    }
+    results.push({
+      title: descripcion || null,
+      clave: clave || null,
+      codigo,
+      productUrl: searchUrl,
+      // Patrón de imagen oficial del catálogo Truper, armado directo desde
+      // el código — no requiere peticiones extra para confirmar que existe;
+      // el <img onerror> del frontend ya oculta la miniatura si no carga.
+      images: [`https://www.truper.com/admin/images/ch/${codigo}.jpg`],
+    });
   }
 
   return results;
-}
-
-// Extrae código, clave, nombre del producto e imágenes de una página de
-// detalle del Banco de Contenido Digital de Truper (formato tipo:
-// "Código:19294 | Clave:FE-AS-8X-16X" seguido de la descripción del
-// producto y luego "Selecciona el tamaño de descarga en px:").
-function parseTruperInfoPage(html) {
-  // Quitamos etiquetas HTML para poder buscar el texto plano igual que lo
-  // vería una persona leyendo la página, sin depender de qué etiqueta exacta
-  // envuelve cada dato (más resistente a cambios de maquetado del sitio).
-  // OJO: usamos un solo string (no un arreglo por líneas), porque el nombre
-  // del producto puede quedar repartido en varias etiquetas/líneas distintas
-  // y \s en las expresiones regulares de abajo SÍ cruza saltos de línea.
-  const fullText = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/[ \t]+/g, ' ');
-
-  const codigoMatch = fullText.match(/C[oó]digo\s*:\s*(\d+)/i);
-  const claveMatch = fullText.match(/Clave\s*:\s*([A-Za-z0-9\-]+)/i);
-  const codigo = codigoMatch ? codigoMatch[1] : null;
-  const clave = claveMatch ? claveMatch[1] : null;
-
-  // El nombre del producto es el texto que aparece justo después de
-  // "Clave: XXXXX" y antes de "Selecciona el tamaño de descarga". Puede
-  // tener saltos de línea/espacios de sobra en medio, por eso los colapsamos.
-  let title = null;
-  const nameMatch = fullText.match(/Clave\s*:\s*[A-Za-z0-9\-]+([\s\S]{0,400}?)Selecciona el tama/i);
-  if (nameMatch) {
-    title = nameMatch[1].replace(/\s+/g, ' ').trim();
-    // A veces queda basura tipo "Producto" (encabezado de sección) pegada
-    // al inicio; la quitamos si aparece sola como primera palabra.
-    title = title.replace(/^Producto\s+/i, '').trim();
-    if (title.length < 3) title = null;
-  }
-
-  const imgMatches = [...html.matchAll(/https:\/\/www\.truper\.com\/media\/import\/imagenes\/[^"'\s)]+\.jpg/g)];
-  const images = [...new Set(imgMatches.map((mm) => mm[0]))];
-
-  if (!codigo && !clave && !images.length) return null;
-  return { title, clave, codigo, images };
 }
