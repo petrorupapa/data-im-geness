@@ -64,15 +64,16 @@ export default {
 
     try {
       const url = new URL(request.url);
-      const query = (url.searchParams.get('q') || '').trim();
-      const truperQuery = (url.searchParams.get('truper') || query || '').trim();
+      const q = (url.searchParams.get('q') || '').trim();
+      const dynaQuery = (url.searchParams.get('dyna') || q).trim();
+      const truperQuery = (url.searchParams.get('truper') || q).trim();
 
-      if (!query && !truperQuery) {
-        return jsonResponse({ error: 'Falta el parámetro ?q= (nombre) o ?truper= (código Truper)' }, 400);
+      if (!dynaQuery && !truperQuery) {
+        return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna= o ?truper=' }, 400);
       }
 
       const [dyna, truper] = await Promise.all([
-        query ? searchDyna(query).catch((e) => { console.error('Dyna error', e); return []; }) : [],
+        dynaQuery ? searchDyna(dynaQuery).catch((e) => { console.error('Dyna error', e); return []; }) : [],
         truperQuery ? searchTruper(truperQuery).catch((e) => { console.error('Truper error', e); return []; }) : [],
       ]);
 
@@ -132,7 +133,11 @@ async function searchDyna(query) {
       const html = await res.text();
 
       const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-      const title = titleMatch ? titleMatch[1].replace(/-\s*Dyna.*$/i, '').trim() : query;
+      let title = titleMatch ? titleMatch[1].replace(/-\s*Dyna.*$/i, '').trim() : '';
+      if (!title) {
+        const metaMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i);
+        title = metaMatch ? metaMatch[1].trim() : query;
+      }
 
       const codeMatch = html.match(/C[oó]digo:\s*<\/[^>]+>\s*([A-Za-z0-9\-]+)|C[oó]digo:\s*([A-Za-z0-9\-]+)/i);
       const code = codeMatch ? (codeMatch[1] || codeMatch[2]) : (link.match(/producto\/(\d+)/) || [])[1] || null;
@@ -157,9 +162,33 @@ async function searchDyna(query) {
 async function searchTruper(codeOrName) {
   const results = [];
 
-  // Caso A: si parece una "clave" de Truper (letras+guiones, ej FE-AS-8X-16X),
-  // probamos construir la URL de imagen DIRECTAMENTE — es más rápido y no
-  // depende de que el buscador encuentre la página.
+  // Siempre intentamos primero la búsqueda real (para poder traer el NOMBRE
+  // del producto, no solo la imagen). Buscamos la página de detalle en el
+  // Banco de Contenido Digital de Truper.
+  const links = await ddgSearch(`site:truper.com BancoContenidoDigital ${codeOrName}`, 5);
+  const viewLinks = links.filter((l) => /truper\.com\/BancoContenidoDigital/i.test(l));
+
+  for (const link of viewLinks.slice(0, 3)) {
+    try {
+      const res = await fetch(link, { headers: FETCH_HEADERS });
+      if (!res.ok) continue;
+      const html = await res.text();
+      const parsed = parseTruperInfoPage(html);
+      if (parsed && parsed.images.length) {
+        results.push({ ...parsed, productUrl: link });
+      }
+    } catch (e) {
+      console.error('Error leyendo producto Truper', link, e);
+    }
+  }
+
+  if (results.length) return results;
+
+  // Respaldo: si la búsqueda no encontró nada pero lo que nos dieron ya
+  // parece ser la "clave" exacta de Truper (ej FE-AS-8X-16X), construimos
+  // la URL de la imagen directamente. En este caso no podemos garantizar
+  // el nombre real (no tenemos la página), así que lo dejamos en null para
+  // que la app no invente un nombre.
   const looksLikeClave = /^[A-Za-z0-9]+(-[A-Za-z0-9]+)+$/.test(codeOrName.trim());
   if (looksLikeClave) {
     const clave = codeOrName.trim().toUpperCase();
@@ -174,40 +203,71 @@ async function searchTruper(codeOrName) {
       } catch (e) { /* ignorar */ }
     }
     if (found.length) {
-      results.push({ title: codeOrName, clave, codigo: null, images: found });
-      return results;
-    }
-  }
-
-  // Caso B: buscamos en el Banco de Contenido Digital de Truper vía DuckDuckGo
-  const links = await ddgSearch(`site:truper.com BancoContenidoDigital ${codeOrName}`, 5);
-  const viewLinks = links.filter((l) => /truper\.com\/BancoContenidoDigital/i.test(l));
-
-  for (const link of viewLinks.slice(0, 3)) {
-    try {
-      const res = await fetch(link, { headers: FETCH_HEADERS });
-      if (!res.ok) continue;
-      const html = await res.text();
-
-      const claveMatch = html.match(/Clave:\s*([A-Za-z0-9\-]+)/i);
-      const codigoMatch = html.match(/C[oó]digo:\s*(\d+)/i);
-      const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-
-      const imgMatches = [...html.matchAll(/https:\/\/www\.truper\.com\/media\/import\/imagenes\/[^"'\s)]+\.jpg/g)];
-      const images = [...new Set(imgMatches.map((mm) => mm[0]))];
-
-      if (images.length) {
-        results.push({
-          title: titleMatch ? titleMatch[1].trim() : codeOrName,
-          clave: claveMatch ? claveMatch[1] : null,
-          codigo: codigoMatch ? codigoMatch[1] : null,
-          images,
-        });
-      }
-    } catch (e) {
-      console.error('Error leyendo producto Truper', link, e);
+      let fallbackTitle = null;
+      try {
+        // Último intento: buscar el nombre en la web en general (sin
+        // restringir a un solo sitio), por si alguna ficha de distribuidor
+        // menciona esta clave junto con el nombre del producto.
+        const genericLinks = await ddgSearch(`truper ${clave}`, 3);
+        for (const link of genericLinks) {
+          try {
+            const res = await fetch(link, { headers: FETCH_HEADERS });
+            if (!res.ok) continue;
+            const html = await res.text();
+            const t = html.match(/<title>([^<]+)<\/title>/i);
+            if (t && t[1] && !/truper\.com/i.test(link)) {
+              fallbackTitle = t[1].replace(/[-|].*$/, '').trim();
+              break;
+            }
+          } catch (e) { /* ignorar */ }
+        }
+      } catch (e) { /* ignorar */ }
+      results.push({ title: fallbackTitle, clave, codigo: null, images: found });
     }
   }
 
   return results;
+}
+
+// Extrae código, clave, nombre del producto e imágenes de una página de
+// detalle del Banco de Contenido Digital de Truper (formato tipo:
+// "Código:19294 | Clave:FE-AS-8X-16X" seguido de la descripción del
+// producto y luego "Selecciona el tamaño de descarga en px:").
+function parseTruperInfoPage(html) {
+  // Quitamos etiquetas HTML para poder buscar el texto plano igual que lo
+  // vería una persona leyendo la página, sin depender de qué etiqueta exacta
+  // envuelve cada dato (más resistente a cambios de maquetado del sitio).
+  // OJO: usamos un solo string (no un arreglo por líneas), porque el nombre
+  // del producto puede quedar repartido en varias etiquetas/líneas distintas
+  // y \s en las expresiones regulares de abajo SÍ cruza saltos de línea.
+  const fullText = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/[ \t]+/g, ' ');
+
+  const codigoMatch = fullText.match(/C[oó]digo\s*:\s*(\d+)/i);
+  const claveMatch = fullText.match(/Clave\s*:\s*([A-Za-z0-9\-]+)/i);
+  const codigo = codigoMatch ? codigoMatch[1] : null;
+  const clave = claveMatch ? claveMatch[1] : null;
+
+  // El nombre del producto es el texto que aparece justo después de
+  // "Clave: XXXXX" y antes de "Selecciona el tamaño de descarga". Puede
+  // tener saltos de línea/espacios de sobra en medio, por eso los colapsamos.
+  let title = null;
+  const nameMatch = fullText.match(/Clave\s*:\s*[A-Za-z0-9\-]+([\s\S]{0,400}?)Selecciona el tama/i);
+  if (nameMatch) {
+    title = nameMatch[1].replace(/\s+/g, ' ').trim();
+    // A veces queda basura tipo "Producto" (encabezado de sección) pegada
+    // al inicio; la quitamos si aparece sola como primera palabra.
+    title = title.replace(/^Producto\s+/i, '').trim();
+    if (title.length < 3) title = null;
+  }
+
+  const imgMatches = [...html.matchAll(/https:\/\/www\.truper\.com\/media\/import\/imagenes\/[^"'\s)]+\.jpg/g)];
+  const images = [...new Set(imgMatches.map((mm) => mm[0]))];
+
+  if (!codigo && !clave && !images.length) return null;
+  return { title, clave, codigo, images };
 }
