@@ -116,13 +116,19 @@ async function webSearch(query, maxResults = 5, debug = false) {
   }
 
   if (debug) {
+    // Buscamos un fragmento del CUERPO real de resultados (no solo el
+    // <head>) para poder ver el marcado exacto que usa Bing hoy y ajustar
+    // el regex si hace falta. "b_algo" es la clase que Bing usa para cada
+    // resultado orgánico individual.
+    const bodyIndex = html.indexOf('b_algo');
+    const bodySample = bodyIndex >= 0 ? html.slice(bodyIndex - 200, bodyIndex + 1500) : '(no se encontró "b_algo" en el HTML — puede que Bing haya cambiado el marcado, o que no haya resultados)';
+
     return {
       links,
       httpStatus: res.status,
       htmlLength: html.length,
-      // Primeros 1500 caracteres del HTML crudo que devolvió Bing, para
-      // diagnosticar si algún día también empieza a bloquear al Worker.
-      htmlSample: html.slice(0, 1500),
+      htmlSample: html.slice(0, 800),
+      bodySample,
     };
   }
   return links;
@@ -142,6 +148,7 @@ async function searchDyna(query, debug = false) {
       webSearchHttpStatus: searchResult.httpStatus,
       webSearchHtmlLength: searchResult.htmlLength,
       webSearchHtmlSample: searchResult.htmlSample,
+      webSearchBodySample: searchResult.bodySample,
       webSearchLinksFound: links,
       productLinksFound: productLinks,
       results: [],
