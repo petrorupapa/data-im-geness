@@ -102,7 +102,7 @@ function jsonResponse(obj, status = 200) {
 // NOTA: esta función ya solo la usa searchDyna(). searchTruper() dejó de
 // necesitarla porque ahora consulta directamente el buscador oficial de
 // Truper (ver más abajo).
-async function ddgSearch(query, maxResults = 5) {
+async function ddgSearch(query, maxResults = 5, debug = false) {
   const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
   const html = await res.text();
@@ -119,6 +119,18 @@ async function ddgSearch(query, maxResults = 5) {
     if (uddgMatch) href = decodeURIComponent(uddgMatch[1]);
     links.push(href);
   }
+
+  if (debug) {
+    return {
+      links,
+      httpStatus: res.status,
+      htmlLength: html.length,
+      // Primeros 1500 caracteres del HTML crudo que devolvió DuckDuckGo,
+      // para distinguir entre "0 resultados reales" y "nos bloqueó con
+      // una página de verificación/captcha en vez de resultados".
+      htmlSample: html.slice(0, 1500),
+    };
+  }
   return links;
 }
 
@@ -127,11 +139,19 @@ async function ddgSearch(query, maxResults = 5) {
 // ============================================================================
 async function searchDyna(query, debug = false) {
   // 1) Buscamos en DuckDuckGo restringido al dominio de Dyna
-  const links = await ddgSearch(`site:dyna.com.co ${query}`, 5);
+  const ddgResult = await ddgSearch(`site:dyna.com.co ${query}`, 5, debug);
+  const links = debug ? ddgResult.links : ddgResult;
   const productLinks = links.filter((l) => /dyna\.com\.co\/(public\/)?producto\//i.test(l));
 
   if (debug && productLinks.length === 0) {
-    return { ddgLinksFound: links, productLinksFound: productLinks, results: [] };
+    return {
+      ddgHttpStatus: ddgResult.httpStatus,
+      ddgHtmlLength: ddgResult.htmlLength,
+      ddgHtmlSample: ddgResult.htmlSample,
+      ddgLinksFound: links,
+      productLinksFound: productLinks,
+      results: [],
+    };
   }
 
   const results = [];
@@ -164,7 +184,14 @@ async function searchDyna(query, debug = false) {
   }
 
   if (debug) {
-    return { ddgLinksFound: links, productLinksFound: productLinks, resultsParsed: results.length, results };
+    return {
+      ddgHttpStatus: ddgResult.httpStatus,
+      ddgHtmlLength: ddgResult.htmlLength,
+      ddgLinksFound: links,
+      productLinksFound: productLinks,
+      resultsParsed: results.length,
+      results,
+    };
   }
 
   return results;
@@ -291,4 +318,4 @@ async function searchTruper(query, debug = false) {
   }
 
   return results;
-}
+                    }
