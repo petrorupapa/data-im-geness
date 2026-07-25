@@ -182,7 +182,7 @@ async function searchDyna(query, debug = false) {
       const images = [...new Set(imgMatches.map((mm) => mm[0]))];
 
       if (images.length) {
-        results.push({ title, code, productUrl: link, images });
+        results.push({ title, code, codigo: code, marca: null, proveedor: 'Dyna', productUrl: link, images });
       }
     } catch (e) {
       console.error('Error leyendo producto Dyna', link, e);
@@ -321,6 +321,12 @@ async function searchTruper(query, debug = false) {
     if (!/^\d+$/.test(codigo) || seenCodigos.has(codigo)) continue;
     seenCodigos.add(codigo);
 
+    // La columna "Marca" (índice 1) no trae texto, trae el LOGO de la marca
+    // como imagen (ej. ".../images/marcas/old/TRUPER-EXPERT.svg"). Sacamos
+    // el nombre de la marca del propio nombre de archivo del logo.
+    const marcaMatch = (cellChunks[1] || '').match(/marcas\/(?:old\/)?([A-Za-z0-9\-]+)\.(?:svg|png|jpg)/i);
+    const marca = marcaMatch ? marcaMatch[1].replace(/-/g, ' ').trim() : null;
+
     // Imagen de alta calidad: el Banco de Contenido Digital de Truper sirve
     // la foto real del producto (hasta 1800x1800px) en esta ruta, armada
     // directo desde la CLAVE — no requiere ningún "id" interno del sitio.
@@ -339,6 +345,11 @@ async function searchTruper(query, debug = false) {
       title: descripcion || null,
       clave: clave || null,
       codigo,
+      marca,
+      // "proveedor" es fijo (Truper) — sirve para que el sistema interno
+      // sepa de dónde salió el producto, sin mostrarlo necesariamente al
+      // cliente final en el catálogo.
+      proveedor: 'Truper',
       productUrl: searchUrl,
       images,
     });
