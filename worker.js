@@ -438,4 +438,33 @@ async function fetchTruperFichaTecnica(codigo, debug = false) {
     // Descripción: el texto visible entre el link "Ir a página del catálogo"
     // y la frase "Archivos descargables" son las viñetas reales de
     // características del producto.
-    const st
+    const startIdx = html.indexOf('Ir a p');
+    const endIdx = html.indexOf('Archivos descargables', startIdx);
+    let description = null;
+    let bulletsDebug = [];
+    if (startIdx >= 0 && endIdx > startIdx) {
+      const chunk = html.slice(startIdx, endIdx);
+      let bullets = [...chunk.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => m[1]);
+      if (!bullets.length) bullets = [...chunk.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)].map((m) => m[1]);
+      const cleaned = bullets
+        .map((b) => b.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim())
+        .filter((b) => b.length > 3 && !/^ir a p[aá]gina/i.test(b));
+      bulletsDebug = cleaned;
+      if (cleaned.length) description = cleaned.join(' · ');
+    }
+
+    if (debug) {
+      return {
+        httpStatus: res.status,
+        htmlLength: html.length,
+        images,
+        description,
+        bulletsFound: bulletsDebug,
+        chunkSample: startIdx >= 0 ? html.slice(startIdx, startIdx + 1500) : '(no se encontró el marcador "Ir a p...")',
+      };
+    }
+    return { images, description };
+  } catch (e) {
+    return debug ? { error: String(e), images: [], description: null } : { images: [], description: null };
+  }
+}
