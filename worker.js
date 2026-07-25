@@ -136,16 +136,20 @@ async function searchDyna(query, debug = false) {
   // su ficha (dyna.com.co/producto/{codigo}/{slug}/{empaque}/). El mismo
   // producto puede repetirse varias veces por distintas presentaciones de
   // empaque (Unidad, Caja x N, etc.) — nos quedamos con la primera.
-  const productRegex = /href="(https:\/\/(?:www\.)?dyna\.com\.co\/(?:public\/)?producto\/(\d+)\/[^"]+)"[^>]*>([^<]+)<\/a>/gi;
+  // El href puede venir absoluto (https://www.dyna.com.co/producto/...) o
+  // relativo (/producto/... o /public/producto/...) según la plantilla.
+  const productRegex = /href="((?:https?:\/\/(?:www\.)?dyna\.com\.co)?\/(?:public\/)?producto\/(\d+)\/[^"]+)"[^>]*>([^<]+)<\/a>/gi;
   const seenCodigos = new Set();
   const results = [];
   let m;
   while ((m = productRegex.exec(html))) {
-    const [, link, codigo, nameRaw] = m;
+    let [, link, codigo, nameRaw] = m;
     if (seenCodigos.has(codigo)) continue;
     seenCodigos.add(codigo);
     const title = decodeHtmlEntities(nameRaw).replace(/\s+/g, ' ').trim();
     if (!title) continue;
+    // Si el link vino relativo, lo completamos con el dominio.
+    if (link.startsWith('/')) link = `https://www.dyna.com.co${link}`;
     results.push({
       title,
       code: codigo,
@@ -168,10 +172,19 @@ async function searchDyna(query, debug = false) {
   }));
 
   if (debug) {
+    // Si no se parseó nada, mostramos dónde aparece la primera mención de
+    // "producto/" en el HTML crudo, para ver el formato real del link (y
+    // si contiene "href=" cerca, o si el listado viene armado por JS).
+    let productoSample = null;
+    if (results.length === 0) {
+      const idx = html.search(/\/producto\/\d+\//i);
+      productoSample = idx >= 0 ? html.slice(Math.max(0, idx - 300), idx + 300) : '(no se encontró "/producto/{numero}/" en ningún lado del HTML)';
+    }
     return {
       httpStatus: res.status,
       htmlLength: html.length,
       resultsParsed: results.length,
+      productoSample,
       results,
     };
   }
