@@ -203,23 +203,6 @@ async function searchDyna(query, debug = false) {
   return results;
 }
 
-// Cuando el usuario busca por un código o clave EXACTO (no texto libre),
-// Truper suele tener más de una foto del mismo producto en su banco de
-// imágenes por clave (foto principal + ángulos adicionales D1, D2, D3, D4).
-// Probamos cuáles existen de verdad con peticiones HEAD (rápidas, no traen
-// el contenido de la imagen) y devolvemos solo las que sí responden 200.
-async function fetchExistingImages(candidateUrls) {
-  const checks = await Promise.all(candidateUrls.map(async (imgUrl) => {
-    try {
-      const head = await fetch(imgUrl, { method: 'HEAD', headers: FETCH_HEADERS });
-      return head.ok ? imgUrl : null;
-    } catch (e) {
-      return null;
-    }
-  }));
-  return checks.filter(Boolean);
-}
-
 // ============================================================================
 // TRUPER — Catálogo Vigente oficial (truper.com/CatVigente/buscador)
 // ============================================================================
@@ -249,8 +232,17 @@ async function fetchExistingImages(candidateUrls) {
 // ángulos D1-D4), para que puedas elegir cuál usar. Esto NO se hace para
 // búsquedas de texto libre con muchos resultados (sería lento pedir 5 fotos
 // x 20 productos), solo para el caso "un código/clave específico".
+//
+// CAMBIO IMPORTANTE: ahora consultamos el catálogo de "95/24 Colombia S.A.S"
+// (colombia9524.com), el distribuidor oficial de Truper para Colombia — NO
+// el catálogo de Truper México (truper.com). Ambos corren sobre la misma
+// plataforma (mismo formato de tabla), pero el catálogo de Colombia tiene
+// su propio surtido de productos (hay cosas que México no maneja acá y
+// viceversa) y sus propias fotos alojadas en su propio dominio.
+const TRUPER_CATALOG_BASE = 'https://www.colombia9524.com/colombia-Catalogo';
+
 async function searchTruper(query, debug = false) {
-  const searchUrl = `https://www.truper.com/CatVigente/buscador?palabra=${encodeURIComponent(query)}&page=1`;
+  const searchUrl = `${TRUPER_CATALOG_BASE}/buscador?palabra=${encodeURIComponent(query)}&page=1`;
   const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
 
   if (!res.ok) {
@@ -327,15 +319,21 @@ async function searchTruper(query, debug = false) {
     const marcaMatch = (cellChunks[1] || '').match(/marcas\/(?:old\/)?([A-Za-z0-9\-]+)\.(?:svg|png|jpg)/i);
     const marca = marcaMatch ? marcaMatch[1].replace(/-/g, ' ').trim() : null;
 
-    // Imagen de alta calidad: el Banco de Contenido Digital de Truper sirve
-    // la foto real del producto (hasta 1800x1800px) en esta ruta, armada
-    // directo desde la CLAVE — no requiere ningún "id" interno del sitio.
-    // Es MUCHO mejor calidad que la miniatura pequeña que usa la tabla del
-    // buscador (admin/images/ch/{codigo}.jpg), así que la ponemos primero;
-    // dejamos la miniatura como segunda opción de respaldo por si la clave
-    // no tiene foto en el banco (el <img onerror> del frontend la oculta
-    // sola si no carga, así que no hay riesgo de mostrar un roto).
+    // El sitio marca cada foto de módulo con una clase tipo "modulo-28601"
+    // en el <a> que envuelve la celda — ese número es el ID de módulo LOCAL
+    // de colombia9524.com, que sirve para armar la ruta de imagen propia de
+    // Colombia (colombia-Catalogo/images/modulos/{id}.jpg). La ponemos como
+    // opción principal porque es la que sabemos que existe para lo que
+    // Colombia sí tiene en su catálogo; dejamos también la ruta del banco
+    // de imágenes de Truper (por clave, alta resolución) como respaldo, por
+    // si el producto comparte foto con el catálogo de México.
+    const moduloMatch = rowHtml.match(/modulo-(\d+)/);
+    const moduloId = moduloMatch ? moduloMatch[1] : null;
+
     const images = [];
+    if (moduloId) {
+      images.push(`${TRUPER_CATALOG_BASE}/images/modulos/${moduloId}.jpg`);
+    }
     if (clave) {
       images.push(`https://www.truper.com/media/import/imagenes/${encodeURIComponent(clave.toUpperCase())}.jpg`);
     }
@@ -355,36 +353,32 @@ async function searchTruper(query, debug = false) {
     });
   }
 
-  // NUEVO: antes solo buscábamos fotos extra (ángulos/características) cuando
-  // la consulta coincidía EXACTO con un código/clave. Ahora lo hacemos para
-  // varios productos de la lista (para que cada resultado muestre sus ~4
-  // fotos reales, no solo la principal). OJO: Cloudflare Workers en el plan
-  // gratis permite máximo ~50 subrequests por ejecución, así que limitamos
-  // cuántos productos enriquecemos y cuántos candidatos probamos por cada
-  // uno para no pasarnos ese límite.
+  // NUEVO: en vez de "adivinar" qué fotos adicionales existen probando
+  // sufijos (+D1, +FC1, etc.) con peticiones HEAD, consultamos la Ficha
+  // Técnica real de Truper (truper.com/ficha_tecnica/...) — es un sistema
+  // compartido de Truper a nivel corporativo, funciona con el mismo código
+  // sin importar si el producto salió del catálogo de México o del de
+  // Colombia (95/24). Esa página trae TODAS las fotos reales del producto
+  // (no solo 4: puede traer +FC1, +FC2, +A1, +E1, +EI1, +EM1, etc. según el
+  // producto) y una descripción real en viñetas de sus características.
+  //
+  // Solo lo hacemos para los primeros resultados (por el límite de ~50
+  // subrequests del plan gratis de Cloudflare Workers): si hay coincidencia
+  // exacta con un código/clave, solo ese producto; si es texto libre con
+  // varios resultados, los primeros 8.
   const trimmedQuery = query.trim().toUpperCase();
   const exactMatch = results.find(
     (r) => r.codigo === query.trim() || (r.clave && r.clave.toUpperCase() === trimmedQuery)
   );
-
-  // Si hay una coincidencia exacta (buscaste un código/clave puntual), solo
-  // enriquecemos ESE producto pero a fondo (D1-D4 y FC1-FC4). Si buscaste
-  // texto libre con varios resultados, enriquecemos los primeros de la
-  // lista con menos candidatos cada uno, para repartir el presupuesto de
-  // peticiones entre más productos en vez de agotarlo en el primero.
   const productsToEnrich = exactMatch ? [exactMatch] : results.slice(0, 8);
-  const suffixesPerProduct = exactMatch ? ['D1', 'D2', 'D3', 'D4', 'FC1', 'FC2', 'FC3', 'FC4'] : ['D1', 'D2', 'D3', 'D4'];
 
   await Promise.all(productsToEnrich.map(async (product) => {
-    if (!product.clave) return;
-    const claveUp = encodeURIComponent(product.clave.toUpperCase());
-    const candidates = [
-      `https://www.truper.com/media/import/imagenes/${claveUp}.jpg`,
-      ...suffixesPerProduct.map((suf) => `https://www.truper.com/media/import/imagenes/${claveUp}+${suf}.jpg`),
-    ];
-    const confirmedImages = await fetchExistingImages(candidates);
-    if (confirmedImages.length) {
-      product.images = [...new Set([...product.images, ...confirmedImages])];
+    const extra = await fetchTruperFichaTecnica(product.codigo);
+    if (extra.images.length) {
+      product.images = [...new Set([...product.images, ...extra.images])];
+    }
+    if (extra.description) {
+      product.description = extra.description;
     }
   }));
 
@@ -406,3 +400,41 @@ async function searchTruper(query, debug = false) {
 
   return results;
 }
+
+// ============================================================================
+// FICHA TÉCNICA DE TRUPER — descripción real + todas las fotos del producto
+// ============================================================================
+// https://www.truper.com/ficha_tecnica/controllers/index.php?codigo={codigo}
+// Esta página trae, para un código dado: el nombre de la clave, varias
+// líneas de descripción/características reales (ej. "Cuerpo fabricado en
+// acero...", "Base de ABS y terminales de aluminio...") y TODAS las fotos
+// reales del producto (bajo la ruta media/import/imagenes/{CLAVE}...jpg,
+// con distintos sufijos según el producto — no siempre los mismos).
+async function fetchTruperFichaTecnica(codigo, debug = false) {
+  const url = `https://www.truper.com/ficha_tecnica/controllers/index.php?codigo=${encodeURIComponent(codigo)}`;
+  try {
+    const res = await fetch(url, { headers: FETCH_HEADERS });
+    if (!res.ok) return debug ? { httpStatus: res.status, images: [], description: null } : { images: [], description: null };
+    const html = await res.text();
+
+    // Todas las fotos reales: cualquier URL de imagen bajo media/import/imagenes/
+    // que aparezca en la página (aparecen repetidas por el carrusel/miniaturas,
+    // por eso las deduplicamos con un Set).
+    const images = [...new Set([...html.matchAll(/https:\/\/www\.truper\.com\/media\/import\/imagenes\/[^"'\s)]+\.jpg/gi)].map((m) => m[0]))];
+
+    // Descripción: el texto visible entre el link "Ir a página del catálogo"
+    // y la frase "Archivos descargables" son las viñetas reales de
+    // características del producto.
+    const startIdx = html.indexOf('Ir a p');
+    const endIdx = html.indexOf('Archivos descargables', startIdx);
+    let description = null;
+    let bulletsDebug = [];
+    if (startIdx >= 0 && endIdx > startIdx) {
+      const chunk = html.slice(startIdx, endIdx);
+      let bullets = [...chunk.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => m[1]);
+      if (!bullets.length) bullets = [...chunk.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)].map((m) => m[1]);
+      const cleaned = bullets
+        .map((b) => b.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim())
+        .filter((b) => b.length > 3 && !/^ir a p[aá]gina/i.test(b));
+      bulletsDebug = cleaned;
+      if (cleaned.length) description = cleaned.join
