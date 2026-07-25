@@ -451,31 +451,32 @@ async function fetchTruperFichaTecnica(codigo, debug = false) {
     // por eso las deduplicamos con un Set).
     const images = [...new Set([...html.matchAll(/https:\/\/www\.truper\.com\/media\/import\/imagenes\/[^"'\s)]+\.jpg/gi)].map((m) => m[0]))];
 
-    // Descripción: el texto visible entre el link "Ir a página del catálogo"
-    // y la frase "Archivos descargables" son las viñetas reales de
-    // características del producto.
-    const startIdx = html.indexOf('Ir a p');
-    const endIdx = html.indexOf('Archivos descargables', startIdx);
-    let description = null;
-    let bulletsDebug = [];
-    if (startIdx >= 0 && endIdx > startIdx) {
-      const chunk = html.slice(startIdx, endIdx);
-      let bullets = [...chunk.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => m[1]);
-      if (!bullets.length) bullets = [...chunk.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)].map((m) => m[1]);
-      const cleaned = bullets
+    // Descripción: confirmamos con datos reales que cada viñeta de
+    // características viene en esta estructura específica y consistente:
+    //   <div class="row fs-6">
+    //     <div class="col-1 col_list"><span class="lista">•</span></div>
+    //     <div class="col-11 especs_margen"><p class="lh-2">TEXTO</p></div>
+    //   </div>
+    // Antes intentábamos ubicar el bloque con marcadores de texto sueltos
+    // ("Ir a página del catálogo" / "Archivos descargables"), pero esa
+    // ventana no siempre contenía las viñetas reales (quedaban más abajo
+    // en la página, en la versión "completa" duplicada), lo que a veces
+    // devolvía texto de otra sección (ej. "Especificaciones técnicas ·
+    // Incluye") o nada. Apuntar directo a la clase real es mucho más
+    // confiable, sin depender de en qué posición del HTML caiga.
+    const rawBullets = [...html.matchAll(/especs_margen[^>]*>\s*<p[^>]*>([\s\S]*?)<\/p>/gi)].map((m) => m[1]);
+    const cleaned = [...new Set(
+      rawBullets
         .map((b) => decodeHtmlEntities(b.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim())
         .filter((b) =>
           b.length > 3 &&
-          // Filtramos encabezados/etiquetas de sección que no son
-          // descripción real del producto (aparecen en algunas fichas antes
-          // de la tabla de especificaciones o de los botones de descarga).
           !/^ir a p[aá]gina/i.test(b) &&
           !/^especificaciones t[eé]cnicas?$/i.test(b) &&
           !/^(certificaciones y garant[ií]a|informaci[oó]n de empaque|videos del producto|inclu[iy]e:?)$/i.test(b)
-        );
-      bulletsDebug = cleaned;
-      if (cleaned.length) description = cleaned.join(' · ');
-    }
+        )
+    )];
+    const description = cleaned.length ? cleaned.join(' · ') : null;
+    const bulletsDebug = cleaned;
 
     if (debug) {
       return {
@@ -483,8 +484,8 @@ async function fetchTruperFichaTecnica(codigo, debug = false) {
         htmlLength: html.length,
         images,
         description,
+        rawBulletsFound: rawBullets.length,
         bulletsFound: bulletsDebug,
-        chunkSample: startIdx >= 0 ? html.slice(startIdx, startIdx + 1500) : '(no se encontró el marcador "Ir a p...")',
       };
     }
     return { images, description };
