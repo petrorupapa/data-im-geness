@@ -414,6 +414,22 @@ async function searchTruper(query, debug = false) {
   return results;
 }
 
+// Decodifica las entidades HTML más comunes en texto en español. Antes solo
+// se decodificaba &amp;, por lo que tildes y eñes salían literalmente como
+// "&eacute;", "&ntilde;", etc. en la descripción guardada.
+const HTML_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  eacute: 'é', oacute: 'ó', aacute: 'á', iacute: 'í', uacute: 'ú', uuml: 'ü',
+  Eacute: 'É', Oacute: 'Ó', Aacute: 'Á', Iacute: 'Í', Uacute: 'Ú',
+  ntilde: 'ñ', Ntilde: 'Ñ', iexcl: '¡', iquest: '¿', ordm: 'º', ordf: 'ª',
+};
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&([a-zA-Z]+);/g, (match, name) => (name in HTML_ENTITIES ? HTML_ENTITIES[name] : match))
+    .replace(/&#(\d+);/g, (match, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
 // ============================================================================
 // FICHA TÉCNICA DE TRUPER — descripción real + todas las fotos del producto
 // ============================================================================
@@ -447,8 +463,16 @@ async function fetchTruperFichaTecnica(codigo, debug = false) {
       let bullets = [...chunk.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => m[1]);
       if (!bullets.length) bullets = [...chunk.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)].map((m) => m[1]);
       const cleaned = bullets
-        .map((b) => b.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim())
-        .filter((b) => b.length > 3 && !/^ir a p[aá]gina/i.test(b));
+        .map((b) => decodeHtmlEntities(b.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim())
+        .filter((b) =>
+          b.length > 3 &&
+          // Filtramos encabezados/etiquetas de sección que no son
+          // descripción real del producto (aparecen en algunas fichas antes
+          // de la tabla de especificaciones o de los botones de descarga).
+          !/^ir a p[aá]gina/i.test(b) &&
+          !/^especificaciones t[eé]cnicas?$/i.test(b) &&
+          !/^(certificaciones y garant[ií]a|informaci[oó]n de empaque|videos del producto|inclu[iy]e:?)$/i.test(b)
+        );
       bulletsDebug = cleaned;
       if (cleaned.length) description = cleaned.join(' · ');
     }
