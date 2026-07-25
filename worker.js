@@ -68,8 +68,16 @@ export default {
       const dynaQuery = (url.searchParams.get('dyna') || q).trim();
       const truperQuery = (url.searchParams.get('truper') || q).trim();
       const fichaTecnicaCodigo = (url.searchParams.get('fichaTecnica') || '').trim();
+      const dynaDetalleUrl = (url.searchParams.get('dynaDetalle') || '').trim();
 
       const debug = url.searchParams.get('debug') === '1';
+
+      // NUEVO: modo de diagnóstico directo de una página de producto Dyna.
+      // Uso: ?dynaDetalle=https://www.dyna.com.co/producto/42641/.../C12/&debug=1
+      if (dynaDetalleUrl) {
+        const result = await fetchDynaProductDetail(dynaDetalleUrl, true);
+        return jsonResponse(result);
+      }
 
       // NUEVO: modo de diagnóstico directo de la Ficha Técnica, sin pasar
       // por toda la búsqueda — para probar puntualmente por qué no está
@@ -81,7 +89,7 @@ export default {
       }
 
       if (!dynaQuery && !truperQuery) {
-        return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna=, ?truper= o ?fichaTecnica=' }, 400);
+        return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna=, ?truper=, ?fichaTecnica= o ?dynaDetalle=' }, 400);
       }
 
       const [dyna, truper] = await Promise.all([
@@ -104,113 +112,102 @@ function jsonResponse(obj, status = 200) {
 }
 
 // ============================================================================
-// BÚSQUEDA WEB GENÉRICA (Bing) — no requiere API key
+
 // ============================================================================
-// NOTA: antes usábamos html.duckduckgo.com aquí, pero confirmamos con
-// debug=1 que DuckDuckGo le está devolviendo al Worker un HTTP 202 sin
-// resultados (un bloqueo/página de verificación típica contra tráfico
-// automatizado desde IPs de datacenter como las de Cloudflare). Bing sirve
-// HTML estático más simple para resultados orgánicos y tolera mejor este
-// tipo de scraping servidor-a-servidor, así que lo usamos en su lugar.
-async function webSearch(query, maxResults = 5, debug = false) {
-  const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+// DYNA (dyna.com.co) — buscador real del sitio
+// ============================================================================
+// NUEVO: antes usábamos Bing/DuckDuckGo con "site:dyna.com.co" para intentar
+// adivinar productos — poco confiable (bloqueos, indexación incompleta).
+// Encontramos el buscador REAL y público de Dyna, que no requiere
+// JavaScript ni sesión:
+//   https://www.dyna.com.co/productos?search=CONSULTA
+// Devuelve tarjetas de producto en HTML plano con nombre, código, imagen
+// (vía su CDN phpThumb) y link a la ficha del producto. Las páginas de
+// producto (dyna.com.co/producto/{codigo}/{slug}/{empaque}/) además traen
+// Marca y una descripción real (sección "CARACTERÍSTICAS").
+async function searchDyna(query, debug = false) {
+  const searchUrl = `https://www.dyna.com.co/productos?search=${encodeURIComponent(query)}`;
   const res = await fetch(searchUrl, { headers: FETCH_HEADERS });
+  if (!res.ok) return debug ? { httpStatus: res.status, results: [] } : [];
+
   const html = await res.text();
 
-  const links = [];
-  // Bing envuelve cada resultado orgánico en <h2><a href="...">Título</a></h2>
-  const re = /<h2><a[^>]+href="([^"]+)"/g;
+  // Cada tarjeta de producto trae un link con el nombre visible apuntando a
+  // su ficha (dyna.com.co/producto/{codigo}/{slug}/{empaque}/). El mismo
+  // producto puede repetirse varias veces por distintas presentaciones de
+  // empaque (Unidad, Caja x N, etc.) — nos quedamos con la primera.
+  const productRegex = /href="(https:\/\/(?:www\.)?dyna\.com\.co\/(?:public\/)?producto\/(\d+)\/[^"]+)"[^>]*>([^<]+)<\/a>/gi;
+  const seenCodigos = new Set();
+  const results = [];
   let m;
-  while ((m = re.exec(html)) && links.length < maxResults) {
-    links.push(m[1]);
+  while ((m = productRegex.exec(html))) {
+    const [, link, codigo, nameRaw] = m;
+    if (seenCodigos.has(codigo)) continue;
+    seenCodigos.add(codigo);
+    const title = decodeHtmlEntities(nameRaw).replace(/\s+/g, ' ').trim();
+    if (!title) continue;
+    results.push({
+      title,
+      code: codigo,
+      codigo,
+      marca: null,
+      proveedor: 'Dyna',
+      productUrl: link,
+      images: [`https://cdn.laferreteria.online/thumb/phpThumb.php?src=/img/${codigo}.jpg`],
+    });
   }
 
+  // Enriquecemos los primeros resultados con Marca + descripción real,
+  // sacadas de la página de cada producto (límite por el tope de ~50
+  // subrequests del plan gratis de Cloudflare Workers).
+  const productsToEnrich = results.slice(0, 8);
+  await Promise.all(productsToEnrich.map(async (product) => {
+    const extra = await fetchDynaProductDetail(product.productUrl);
+    if (extra.marca) product.marca = extra.marca;
+    if (extra.description) product.description = extra.description;
+  }));
+
   if (debug) {
-    // Probamos varios marcadores candidatos de resultados/orgánicos que
-    // Bing ha usado históricamente, para ver cuál (si alguno) está presente
-    // hoy en la respuesta real.
-    const markers = ['b_algo', 'b_results', 'b_title', 'b_caption', 'b_no_results', 'No obtuvimos resultados', 'No se encontraron'];
-    const markerPresence = {};
-    for (const mk of markers) markerPresence[mk] = html.includes(mk);
-
-    // Tomamos un pedazo del cuerpo real (después de </head>) para ver el
-    // marcado tal cual, sin importar qué clase esté usando.
-    const bodyStart = html.indexOf('</head>');
-    const bodySample = bodyStart >= 0 ? html.slice(bodyStart, bodyStart + 3000) : html.slice(0, 3000);
-
     return {
-      links,
       httpStatus: res.status,
       htmlLength: html.length,
-      markerPresence,
-      bodySample,
-    };
-  }
-  return links;
-}
-
-// ============================================================================
-// DYNA (dyna.com.co)
-// ============================================================================
-async function searchDyna(query, debug = false) {
-  // 1) Buscamos en Bing restringido al dominio de Dyna
-  const searchResult = await webSearch(`site:dyna.com.co ${query}`, 5, debug);
-  const links = debug ? searchResult.links : searchResult;
-  const productLinks = links.filter((l) => /dyna\.com\.co\/(public\/)?producto\//i.test(l));
-
-  if (debug && productLinks.length === 0) {
-    return {
-      webSearchHttpStatus: searchResult.httpStatus,
-      webSearchHtmlLength: searchResult.htmlLength,
-      webSearchMarkerPresence: searchResult.markerPresence,
-      webSearchBodySample: searchResult.bodySample,
-      webSearchLinksFound: links,
-      productLinksFound: productLinks,
-      results: [],
-    };
-  }
-
-  const results = [];
-  for (const link of productLinks.slice(0, 3)) {
-    try {
-      const res = await fetch(link, { headers: FETCH_HEADERS });
-      if (!res.ok) continue;
-      const html = await res.text();
-
-      const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-      let title = titleMatch ? titleMatch[1].replace(/-\s*Dyna.*$/i, '').trim() : '';
-      if (!title) {
-        const metaMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i);
-        title = metaMatch ? metaMatch[1].trim() : query;
-      }
-
-      const codeMatch = html.match(/C[oó]digo:\s*<\/[^>]+>\s*([A-Za-z0-9\-]+)|C[oó]digo:\s*([A-Za-z0-9\-]+)/i);
-      const code = codeMatch ? (codeMatch[1] || codeMatch[2]) : (link.match(/producto\/(\d+)/) || [])[1] || null;
-
-      // Imágenes: Dyna sirve las fotos vía su CDN phpThumb.php?src=/img/CODIGO.jpg
-      const imgMatches = [...html.matchAll(/https:\/\/cdn\.laferreteria\.online\/thumb\/phpThumb\.php\?src=\/img\/([A-Za-z0-9_\-.]+)/g)];
-      const images = [...new Set(imgMatches.map((mm) => mm[0]))];
-
-      if (images.length) {
-        results.push({ title, code, codigo: code, marca: null, proveedor: 'Dyna', productUrl: link, images });
-      }
-    } catch (e) {
-      console.error('Error leyendo producto Dyna', link, e);
-    }
-  }
-
-  if (debug) {
-    return {
-      webSearchHttpStatus: searchResult.httpStatus,
-      webSearchHtmlLength: searchResult.htmlLength,
-      webSearchLinksFound: links,
-      productLinksFound: productLinks,
       resultsParsed: results.length,
       results,
     };
   }
 
-  return results;
+  return results.slice(0, 20);
+}
+
+// Página de detalle de un producto Dyna: trae "Marca: XXX" y una sección
+// "CARACTERÍSTICAS" con la descripción real del producto.
+async function fetchDynaProductDetail(productUrl, debug = false) {
+  try {
+    const res = await fetch(productUrl, { headers: FETCH_HEADERS });
+    if (!res.ok) return debug ? { httpStatus: res.status, marca: null, description: null } : { marca: null, description: null };
+    const html = await res.text();
+
+    const marcaMatch = html.match(/Marca:?\s*<\/[^>]+>\s*([^<]+)</i);
+    const marca = marcaMatch ? decodeHtmlEntities(marcaMatch[1]).replace(/\s+/g, ' ').trim() : null;
+
+    let description = null;
+    const startIdx = html.search(/CARACTER[IÍ]STICAS/i);
+    if (startIdx >= 0) {
+      let chunk = html.slice(startIdx, startIdx + 2000)
+        .replace(/CARACTER[IÍ]STICAS/i, '')
+        .replace(/FICHA T[EÉ]CNICA/i, '');
+      const paragraphMatch = chunk.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      const raw = paragraphMatch ? paragraphMatch[1] : chunk;
+      let cleaned = decodeHtmlEntities(raw.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+      if (cleaned.length > 700) cleaned = cleaned.slice(0, 700).trim();
+      if (cleaned.length >= 5) description = cleaned;
+    }
+
+    if (debug) return { httpStatus: res.status, htmlLength: html.length, marca, description };
+    return { marca, description };
+  } catch (e) {
+    return debug ? { error: String(e), marca: null, description: null } : { marca: null, description: null };
+  }
 }
 
 // ============================================================================
