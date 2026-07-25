@@ -67,12 +67,22 @@ export default {
       const q = (url.searchParams.get('q') || '').trim();
       const dynaQuery = (url.searchParams.get('dyna') || q).trim();
       const truperQuery = (url.searchParams.get('truper') || q).trim();
-
-      if (!dynaQuery && !truperQuery) {
-        return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna= o ?truper=' }, 400);
-      }
+      const fichaTecnicaCodigo = (url.searchParams.get('fichaTecnica') || '').trim();
 
       const debug = url.searchParams.get('debug') === '1';
+
+      // NUEVO: modo de diagnóstico directo de la Ficha Técnica, sin pasar
+      // por toda la búsqueda — para probar puntualmente por qué no está
+      // saliendo la descripción de un código específico.
+      // Uso: ?fichaTecnica=104076&debug=1
+      if (fichaTecnicaCodigo) {
+        const result = await fetchTruperFichaTecnica(fichaTecnicaCodigo, true);
+        return jsonResponse(result);
+      }
+
+      if (!dynaQuery && !truperQuery) {
+        return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna=, ?truper= o ?fichaTecnica=' }, 400);
+      }
 
       const [dyna, truper] = await Promise.all([
         dynaQuery ? searchDyna(dynaQuery, debug).catch((e) => { console.error('Dyna error', e); return debug ? { error: String(e) } : []; }) : [],
@@ -337,7 +347,10 @@ async function searchTruper(query, debug = false) {
     if (clave) {
       images.push(`https://www.truper.com/media/import/imagenes/${encodeURIComponent(clave.toUpperCase())}.jpg`);
     }
-    images.push(`https://www.truper.com/admin/images/ch/${codigo}.jpg`);
+    // NOTA: quitamos admin/images/ch/{codigo}.jpg de aquí — es la miniatura
+    // chiquita y pixelada que usa la tablita del buscador, pensada para
+    // verse pequeña, no como foto de catálogo. Preferimos no mostrar nada
+    // antes que mostrar una foto de mala calidad para escoger.
 
     results.push({
       title: descripcion || null,
@@ -425,16 +438,4 @@ async function fetchTruperFichaTecnica(codigo, debug = false) {
     // Descripción: el texto visible entre el link "Ir a página del catálogo"
     // y la frase "Archivos descargables" son las viñetas reales de
     // características del producto.
-    const startIdx = html.indexOf('Ir a p');
-    const endIdx = html.indexOf('Archivos descargables', startIdx);
-    let description = null;
-    let bulletsDebug = [];
-    if (startIdx >= 0 && endIdx > startIdx) {
-      const chunk = html.slice(startIdx, endIdx);
-      let bullets = [...chunk.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => m[1]);
-      if (!bullets.length) bullets = [...chunk.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)].map((m) => m[1]);
-      const cleaned = bullets
-        .map((b) => b.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim())
-        .filter((b) => b.length > 3 && !/^ir a p[aá]gina/i.test(b));
-      bulletsDebug = cleaned;
-      if (cleaned.length) description = cleaned.join
+    const st
