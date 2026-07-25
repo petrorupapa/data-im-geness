@@ -344,34 +344,38 @@ async function searchTruper(query, debug = false) {
     });
   }
 
-  // Si lo que escribiste coincide EXACTO con el código o la clave de uno de
-  // los resultados, vamos por las fotos adicionales de ESE producto (no de
-  // todos, para no hacer lento el buscador de texto libre).
+  // NUEVO: antes solo buscábamos fotos extra (ángulos/características) cuando
+  // la consulta coincidía EXACTO con un código/clave. Ahora lo hacemos para
+  // varios productos de la lista (para que cada resultado muestre sus ~4
+  // fotos reales, no solo la principal). OJO: Cloudflare Workers en el plan
+  // gratis permite máximo ~50 subrequests por ejecución, así que limitamos
+  // cuántos productos enriquecemos y cuántos candidatos probamos por cada
+  // uno para no pasarnos ese límite.
   const trimmedQuery = query.trim().toUpperCase();
   const exactMatch = results.find(
     (r) => r.codigo === query.trim() || (r.clave && r.clave.toUpperCase() === trimmedQuery)
   );
 
-  if (exactMatch) {
-    const candidates = [`https://www.truper.com/admin/images/ch/${exactMatch.codigo}.jpg`];
-    if (exactMatch.clave) {
-      const claveUp = encodeURIComponent(exactMatch.clave.toUpperCase());
-      // Confirmamos en el propio Banco de Contenido Digital de Truper que
-      // usan más de un esquema de sufijo para fotos adicionales según el
-      // producto (ej. "+D1".."+D4" y también "+FC1".."+FC4"), así que
-      // probamos ambos. Las que no existan simplemente no pasan el HEAD.
-      candidates.push(`https://www.truper.com/media/import/imagenes/${claveUp}.jpg`);
-      for (const prefix of ['D', 'FC']) {
-        for (let n = 1; n <= 4; n++) {
-          candidates.push(`https://www.truper.com/media/import/imagenes/${claveUp}+${prefix}${n}.jpg`);
-        }
-      }
-    }
+  // Si hay una coincidencia exacta (buscaste un código/clave puntual), solo
+  // enriquecemos ESE producto pero a fondo (D1-D4 y FC1-FC4). Si buscaste
+  // texto libre con varios resultados, enriquecemos los primeros de la
+  // lista con menos candidatos cada uno, para repartir el presupuesto de
+  // peticiones entre más productos en vez de agotarlo en el primero.
+  const productsToEnrich = exactMatch ? [exactMatch] : results.slice(0, 8);
+  const suffixesPerProduct = exactMatch ? ['D1', 'D2', 'D3', 'D4', 'FC1', 'FC2', 'FC3', 'FC4'] : ['D1', 'D2', 'D3', 'D4'];
+
+  await Promise.all(productsToEnrich.map(async (product) => {
+    if (!product.clave) return;
+    const claveUp = encodeURIComponent(product.clave.toUpperCase());
+    const candidates = [
+      `https://www.truper.com/media/import/imagenes/${claveUp}.jpg`,
+      ...suffixesPerProduct.map((suf) => `https://www.truper.com/media/import/imagenes/${claveUp}+${suf}.jpg`),
+    ];
     const confirmedImages = await fetchExistingImages(candidates);
     if (confirmedImages.length) {
-      exactMatch.images = [...new Set([...exactMatch.images, ...confirmedImages])];
+      product.images = [...new Set([...product.images, ...confirmedImages])];
     }
-  }
+  }));
 
   if (debug) {
     return {
