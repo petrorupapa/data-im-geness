@@ -260,7 +260,7 @@ async function fetchDynaProductDetail(productUrl, debug = false) {
 //
 // Requiere la variable de entorno GEMINI_API_KEY configurada como "secret"
 // en el dashboard de Cloudflare Workers (Settings → Variables and Secrets).
-const GEMINI_MODEL = 'gemini-3.1-flash';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
 async function consultarPrecioReferencia(nombreProducto, marca, env, debug = false) {
   if (!env || !env.GEMINI_API_KEY) {
