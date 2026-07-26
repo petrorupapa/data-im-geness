@@ -155,6 +155,7 @@ async function searchDyna(query, debug = false) {
       code: codigo,
       codigo,
       marca: null,
+      categoria: null,
       proveedor: 'Dyna',
       productUrl: link,
       images: [`https://cdn.laferreteria.online/thumb/phpThumb.php?src=/img/${codigo}.jpg`],
@@ -168,6 +169,7 @@ async function searchDyna(query, debug = false) {
   await Promise.all(productsToEnrich.map(async (product) => {
     const extra = await fetchDynaProductDetail(product.productUrl);
     if (extra.marca) product.marca = extra.marca;
+    if (extra.categoria) product.categoria = extra.categoria;
     if (extra.description) product.description = extra.description;
   }));
 
@@ -203,6 +205,19 @@ async function fetchDynaProductDetail(productUrl, debug = false) {
     const marcaMatch = html.match(/Marca:?\s*<\/[^>]+>\s*([^<]+)</i);
     const marca = marcaMatch ? decodeHtmlEntities(marcaMatch[1]).replace(/\s+/g, ' ').trim() : null;
 
+    // NUEVO: la categoría real del producto sale de las migas de pan
+    // (Inicio > Categoría > Subcategoría > Nombre del producto). Nos
+    // quedamos con el link más específico (el último antes del nombre del
+    // producto, que normalmente ya no es un link).
+    let categoria = null;
+    const breadcrumbMatch = html.match(/<ol[^>]*breadcrumb[^>]*>([\s\S]*?)<\/ol>/i) || html.match(/<nav[^>]*breadcrumb[^>]*>([\s\S]*?)<\/nav>/i);
+    if (breadcrumbMatch) {
+      const items = [...breadcrumbMatch[1].matchAll(/<a[^>]*>([\s\S]*?)<\/a>/gi)]
+        .map((mm) => decodeHtmlEntities(mm[1].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim())
+        .filter((t) => t && !/^inicio$/i.test(t));
+      if (items.length) categoria = items[items.length - 1];
+    }
+
     let description = null;
     const startIdx = html.search(/CARACTER[IÍ]STICAS/i);
     if (startIdx >= 0) {
@@ -216,10 +231,10 @@ async function fetchDynaProductDetail(productUrl, debug = false) {
       if (cleaned.length >= 5) description = cleaned;
     }
 
-    if (debug) return { httpStatus: res.status, htmlLength: html.length, marca, description };
-    return { marca, description };
+    if (debug) return { httpStatus: res.status, htmlLength: html.length, marca, categoria, description };
+    return { marca, categoria, description };
   } catch (e) {
-    return debug ? { error: String(e), marca: null, description: null } : { marca: null, description: null };
+    return debug ? { error: String(e), marca: null, categoria: null, description: null } : { marca: null, categoria: null, description: null };
   }
 }
 
@@ -339,6 +354,15 @@ async function searchTruper(query, debug = false) {
     const marcaMatch = (cellChunks[1] || '').match(/marcas\/(?:old\/)?([A-Za-z0-9\-]+)\.(?:svg|png|jpg)/i);
     const marca = marcaMatch ? marcaMatch[1].replace(/-/g, ' ').trim() : null;
 
+    // NUEVO: cada fila trae un atributo data-source="Martillos-especiales-
+    // TRUPER-286.html" — es literalmente el nombre de la categoría/sección
+    // del catálogo de Truper para ese producto. Le quitamos el sufijo de
+    // marca+número de página y lo dejamos legible.
+    const categoriaMatch = rowHtml.match(/data-source="([^"]+?)-[A-Za-z]+-\d+\.html"/i);
+    const categoria = categoriaMatch
+      ? categoriaMatch[1].replace(/-/g, ' ').replace(/\s+/g, ' ').trim().replace(/^./, (c) => c.toUpperCase())
+      : null;
+
     // El sitio marca cada foto de módulo con una clase tipo "modulo-28601"
     // en el <a> que envuelve la celda — ese número es el ID de módulo LOCAL
     // de colombia9524.com, que sirve para armar la ruta de imagen propia de
@@ -367,6 +391,7 @@ async function searchTruper(query, debug = false) {
       clave: clave || null,
       codigo,
       marca,
+      categoria,
       // "proveedor" es fijo (Truper) — sirve para que el sistema interno
       // sepa de dónde salió el producto, sin mostrarlo necesariamente al
       // cliente final en el catálogo.
