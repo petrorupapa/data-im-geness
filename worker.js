@@ -57,7 +57,7 @@ const FETCH_HEADERS = {
 };
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
@@ -69,8 +69,19 @@ export default {
       const truperQuery = (url.searchParams.get('truper') || q).trim();
       const fichaTecnicaCodigo = (url.searchParams.get('fichaTecnica') || '').trim();
       const dynaDetalleUrl = (url.searchParams.get('dynaDetalle') || '').trim();
+      const precioNombre = (url.searchParams.get('precio') || '').trim();
 
       const debug = url.searchParams.get('debug') === '1';
+
+      // NUEVO: precio de referencia de venta al público, consultando a
+      // Gemini con "Grounding con Google Search" — busca en vivo en
+      // MercadoLibre, Luis Penagos, y otras ferreterías con web.
+      // Uso: ?precio=NOMBRE+DEL+PRODUCTO&marca=MARCA (marca es opcional)
+      if (precioNombre) {
+        const marca = (url.searchParams.get('marca') || '').trim();
+        const result = await consultarPrecioReferencia(precioNombre, marca, env, debug);
+        return jsonResponse(result);
+      }
 
       // NUEVO: modo de diagnóstico directo de una página de producto Dyna.
       // Uso: ?dynaDetalle=https://www.dyna.com.co/producto/42641/.../C12/&debug=1
@@ -89,7 +100,7 @@ export default {
       }
 
       if (!dynaQuery && !truperQuery) {
-        return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna=, ?truper=, ?fichaTecnica= o ?dynaDetalle=' }, 400);
+        return jsonResponse({ error: 'Falta el parámetro ?q=, ?dyna=, ?truper=, ?fichaTecnica=, ?dynaDetalle= o ?precio=' }, 400);
       }
 
       const [dyna, truper] = await Promise.all([
@@ -237,6 +248,82 @@ async function fetchDynaProductDetail(productUrl, debug = false) {
     return debug ? { error: String(e), marca: null, categoria: null, description: null } : { marca: null, categoria: null, description: null };
   }
 }
+
+// ============================================================================
+// PRECIO DE REFERENCIA — Gemini con "Grounding con Google Search"
+// ============================================================================
+// En vez de scrapear a mano cada ferretería con web (Luis Penagos,
+// MercadoLibre, etc. — tarea interminable, y la API pública de MercadoLibre
+// además está cerrada desde abril 2025), le pedimos a Gemini que busque en
+// Google en vivo y sintetice el precio de venta al público en Colombia,
+// citando las fuentes reales que haya encontrado.
+//
+// Requiere la variable de entorno GEMINI_API_KEY configurada como "secret"
+// en el dashboard de Cloudflare Workers (Settings → Variables and Secrets).
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
+async function consultarPrecioReferencia(nombreProducto, marca, env, debug = false) {
+  if (!env || !env.GEMINI_API_KEY) {
+    return { error: 'Falta configurar el secret GEMINI_API_KEY en el Worker (Settings → Variables and Secrets en Cloudflare).' };
+  }
+
+  const consulta = marca ? `${nombreProducto} ${marca}` : nombreProducto;
+  const prompt = `Eres un asistente que ayuda a una ferretería en Colombia a fijar precios de venta al público.
+
+Busca en internet el precio de venta al público (PVP) en pesos colombianos (COP) para este producto de ferretería: "${consulta}".
+
+Busca específicamente en: MercadoLibre Colombia, Ferretería Luis Penagos (ferreterialuispenagos.com), Tul.com.co, y cualquier otra ferretería colombiana con tienda web que lo tenga.
+
+Responde en español, de forma breve y directa, con este formato:
+1. Un rango de precios aproximado en COP (ej: "Entre $45.000 y $62.000 COP") basado en lo que encontraste.
+2. Una lista corta de 2-4 fuentes concretas con su precio y de dónde salió (ej: "MercadoLibre: $58.900 (tienda X)").
+3. Si no encuentras el producto exacto, dilo claramente en vez de inventar un precio — busca productos muy similares y acláralo.
+
+No inventes precios ni fuentes. Si no encuentras nada confiable, dilo honestamente.`;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          tools: [{ google_search: {} }],
+        }),
+      }
+    );
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      return { error: data?.error?.message || `Gemini devolvió un error (HTTP ${res.status})`, ...(debug ? { raw: data } : {}) };
+    }
+
+    const candidate = data?.candidates?.[0];
+    const texto = candidate?.content?.parts?.map((p) => p.text).filter(Boolean).join('\n') || null;
+
+    // Fuentes reales que Gemini usó para fundamentar la respuesta (más
+    // confiables que lo que el texto mismo diga, porque vienen directo de
+    // los resultados de búsqueda que el modelo consultó).
+    const chunks = candidate?.groundingMetadata?.groundingChunks || [];
+    const fuentes = chunks
+      .map((c) => (c.web ? { titulo: c.web.title || null, url: c.web.uri || null } : null))
+      .filter(Boolean);
+
+    if (!texto) {
+      return { error: 'Gemini no devolvió una respuesta de texto.', ...(debug ? { raw: data } : {}) };
+    }
+
+    return { respuesta: texto, fuentes, ...(debug ? { raw: data } : {}) };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
 
 // ============================================================================
 // TRUPER — Catálogo Vigente oficial (truper.com/CatVigente/buscador)
