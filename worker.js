@@ -250,36 +250,88 @@ async function fetchDynaProductDetail(productUrl, debug = false) {
 }
 
 // ============================================================================
-// PRECIO DE REFERENCIA — Gemini con "Grounding con Google Search"
+// PRECIO DE REFERENCIA — Firecrawl (búsqueda real) + Gemini (redacta)
 // ============================================================================
-// En vez de scrapear a mano cada ferretería con web (Luis Penagos,
-// MercadoLibre, etc. — tarea interminable, y la API pública de MercadoLibre
-// además está cerrada desde abril 2025), le pedimos a Gemini que busque en
-// Google en vivo y sintetice el precio de venta al público en Colombia,
-// citando las fuentes reales que haya encontrado.
+// El "Grounding con Google Search" de Gemini resultó requerir facturación
+// activada en la cuenta (cuota 0 sin tarjeta) — así que lo separamos en dos
+// piezas, cada una gratis por su cuenta sin tarjeta:
+//   1) Firecrawl (firecrawl.dev) hace la búsqueda real en internet — su
+//      plan gratis da 1.000 créditos/mes sin pedir tarjeta, y una búsqueda
+//      simple (sin scrapear cada página) cuesta muy poco.
+//   2) Gemini (el mismo que ya usas en tu bot de Telegram, SIN la
+//      herramienta de grounding) redacta el resumen a partir de los
+//      resultados REALES que Firecrawl encontró — no busca nada por su
+//      cuenta, solo organiza lo que ya le dimos.
 //
-// Requiere la variable de entorno GEMINI_API_KEY configurada como "secret"
-// en el dashboard de Cloudflare Workers (Settings → Variables and Secrets).
+// Requiere DOS secrets configurados en el Worker (Settings → Variables and
+// Secrets en Cloudflare):
+//   - FIRECRAWL_API_KEY  (de https://firecrawl.dev, plan gratis)
+//   - GEMINI_API_KEY     (el que ya tienes, plan gratis normal — sin billing)
 const GEMINI_MODEL = 'gemini-2.5-flash-lite';
 
 async function consultarPrecioReferencia(nombreProducto, marca, env, debug = false) {
-  if (!env || !env.GEMINI_API_KEY) {
+  if (!env || !env.FIRECRAWL_API_KEY) {
+    return { error: 'Falta configurar el secret FIRECRAWL_API_KEY en el Worker (Settings → Variables and Secrets en Cloudflare). Crea una cuenta gratis en firecrawl.dev para conseguirlo.' };
+  }
+  if (!env.GEMINI_API_KEY) {
     return { error: 'Falta configurar el secret GEMINI_API_KEY en el Worker (Settings → Variables and Secrets en Cloudflare).' };
   }
 
   const consulta = marca ? `${nombreProducto} ${marca}` : nombreProducto;
+
+  // 1) Búsqueda real con Firecrawl — pedimos solo título/descripción de
+  // cada resultado (sin scrapeOptions) para gastar el mínimo de créditos.
+  let searchResults = [];
+  try {
+    const searchRes = await fetch('https://api.firecrawl.dev/v2/search', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.FIRECRAWL_API_KEY}`,
+      },
+      body: JSON.stringify({
+        query: `precio ${consulta} Colombia ferretería`,
+        limit: 8,
+        sources: ['web'],
+      }),
+    });
+    const searchData = await searchRes.json();
+    if (!searchRes.ok) {
+      return { error: searchData?.error || `Firecrawl devolvió un error (HTTP ${searchRes.status})`, ...(debug ? { rawSearch: searchData } : {}) };
+    }
+    // La forma exacta de la respuesta puede venir como data.web (array) o
+    // data como array plano según la versión — cubrimos ambos casos.
+    const rawResults = searchData?.data?.web || (Array.isArray(searchData?.data) ? searchData.data : []) || [];
+    searchResults = rawResults.map((r) => ({
+      titulo: r.title || null,
+      url: r.url || null,
+      descripcion: r.description || null,
+    })).filter((r) => r.url);
+  } catch (e) {
+    return { error: `Error consultando Firecrawl: ${String(e)}` };
+  }
+
+  if (!searchResults.length) {
+    return { respuesta: 'No se encontraron resultados de búsqueda para este producto.', fuentes: [] };
+  }
+
+  // 2) Gemini redacta el resumen a partir de esos resultados REALES —
+  // sin herramienta de búsqueda (google_search), así que no cuesta nada
+  // extra ni necesita facturación.
+  const listaResultados = searchResults
+    .map((r, i) => `${i + 1}. ${r.titulo || '(sin título)'}\n   URL: ${r.url}\n   ${r.descripcion || '(sin descripción)'}`)
+    .join('\n\n');
+
   const prompt = `Eres un asistente que ayuda a una ferretería en Colombia a fijar precios de venta al público.
 
-Busca en internet el precio de venta al público (PVP) en pesos colombianos (COP) para este producto de ferretería: "${consulta}".
+Estos son resultados REALES de una búsqueda en internet sobre el precio de venta al público (PVP) en pesos colombianos (COP) para el producto: "${consulta}".
 
-Busca específicamente en: MercadoLibre Colombia, Ferretería Luis Penagos (ferreterialuispenagos.com), Tul.com.co, y cualquier otra ferretería colombiana con tienda web que lo tenga.
+${listaResultados}
 
-Responde en español, de forma breve y directa, con este formato:
-1. Un rango de precios aproximado en COP (ej: "Entre $45.000 y $62.000 COP") basado en lo que encontraste.
-2. Una lista corta de 2-4 fuentes concretas con su precio y de dónde salió (ej: "MercadoLibre: $58.900 (tienda X)").
-3. Si no encuentras el producto exacto, dilo claramente en vez de inventar un precio — busca productos muy similares y acláralo.
-
-No inventes precios ni fuentes. Si no encuentras nada confiable, dilo honestamente.`;
+Con base ÚNICAMENTE en esta información (no inventes nada que no esté aquí), responde en español, breve y directo:
+1. Un rango de precios aproximado en COP si los resultados lo permiten (ej: "Entre $45.000 y $62.000 COP").
+2. Cuáles de estos resultados mencionan un precio concreto y cuál es.
+3. Si ninguno trae un precio claro o el producto no coincide bien, dilo honestamente en vez de inventar un precio.`;
 
   try {
     const res = await fetch(
@@ -292,7 +344,6 @@ No inventes precios ni fuentes. Si no encuentras nada confiable, dilo honestamen
         },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          tools: [{ google_search: {} }],
         }),
       }
     );
@@ -300,27 +351,23 @@ No inventes precios ni fuentes. Si no encuentras nada confiable, dilo honestamen
     const data = await res.json();
 
     if (!res.ok) {
-      return { error: data?.error?.message || `Gemini devolvió un error (HTTP ${res.status})`, ...(debug ? { raw: data } : {}) };
+      return { error: data?.error?.message || `Gemini devolvió un error (HTTP ${res.status})`, fuentes: searchResults, ...(debug ? { raw: data } : {}) };
     }
 
     const candidate = data?.candidates?.[0];
     const texto = candidate?.content?.parts?.map((p) => p.text).filter(Boolean).join('\n') || null;
 
-    // Fuentes reales que Gemini usó para fundamentar la respuesta (más
-    // confiables que lo que el texto mismo diga, porque vienen directo de
-    // los resultados de búsqueda que el modelo consultó).
-    const chunks = candidate?.groundingMetadata?.groundingChunks || [];
-    const fuentes = chunks
-      .map((c) => (c.web ? { titulo: c.web.title || null, url: c.web.uri || null } : null))
-      .filter(Boolean);
-
     if (!texto) {
-      return { error: 'Gemini no devolvió una respuesta de texto.', ...(debug ? { raw: data } : {}) };
+      return { error: 'Gemini no devolvió una respuesta de texto.', fuentes: searchResults, ...(debug ? { raw: data } : {}) };
     }
 
-    return { respuesta: texto, fuentes, ...(debug ? { raw: data } : {}) };
+    // Las fuentes que mostramos son las de Firecrawl (reales, verificadas),
+    // no lo que Gemini diga que citó.
+    const fuentes = searchResults.map((r) => ({ titulo: r.titulo, url: r.url }));
+
+    return { respuesta: texto, fuentes, ...(debug ? { raw: data, rawSearchResults: searchResults } : {}) };
   } catch (e) {
-    return { error: String(e) };
+    return { error: String(e), fuentes: searchResults };
   }
 }
 
