@@ -267,7 +267,7 @@ async function fetchDynaProductDetail(productUrl, debug = false) {
 // Secrets en Cloudflare):
 //   - FIRECRAWL_API_KEY  (de https://firecrawl.dev, plan gratis)
 //   - GEMINI_API_KEY     (el que ya tienes, plan gratis normal — sin billing)
-const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
 async function consultarPrecioReferencia(nombreProducto, marca, env, debug = false) {
   if (!env || !env.FIRECRAWL_API_KEY) {
